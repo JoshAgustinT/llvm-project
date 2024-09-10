@@ -48,6 +48,7 @@
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LazyBlockFrequencyInfo.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
@@ -98,7 +99,9 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
+#include <unistd.h>
 #include <memory>
 #include <optional>
 #include <string>
@@ -5034,71 +5037,206 @@ void InstCombinerImpl::tryToSinkInstructionDbgVariableRecords(
   }
 }
 
-void log_optzn(std::string Name) {
-  // TODO-- John will fill in the missing code here
+void log_optzn(const std::string &Name) {
+  char *home = getenv("HOME");
+  assert(home);
+  char fn[1024];
+  strcpy(fn, home);
+  strcat(fn, "/optimization_log.txt");
+  FILE *f = fopen(fn, "a");
+  assert(f);
+  char s[1024];
+  auto pid = getpid();
+  snprintf(s, 1024, "process %d: CS6475 optimization by %s\n", pid, Name.c_str());
+  int len = strlen(s);
+  int res = fwrite(s, 1, len, f);
+  assert(res == len);
 }
 
 void cs6475_debug(std::string DbgString) {
   // set this to "false" to suppress debug output, before running "ninja test"
   // set this to "true" to see debug output, to help you understand your transformation
-  if (false)
+  if (true)
     dbgs() << DbgString;
 }
 
-Instruction* cs6475_optimizer(Instruction *I) {
-  
-  cs6475_debug("\nCS 6475 matcher: running now\n");
-  
-  // BEGIN JOSHUA TLATELPA-AGUSTIN
-  // trunc( ((((z*2050) & 139536) ∣ ((z*32800) & 558144)) * 65793) ≫ 16 ), z → zext64(i8)
-  // → trunc((((z*2149582850) & 36578664720) * 4311810305) ≫ 32), z → zext64(i8)
-  Value *J15 = nullptr;
-  Value *J0 = nullptr;
-  ConstantInt *J1 = nullptr;
-  Value *J2 = nullptr;
-  ConstantInt *J3 = nullptr;
-  Value *J4 = nullptr;
-  Value *J5 = nullptr;
-  Value *J6 = nullptr;
-  ConstantInt *J7 = nullptr;
-  Value *J8 = nullptr;
-  ConstantInt *J9 = nullptr;
-  Value *J10 = nullptr;
-  ConstantInt *J11 = nullptr;
-  Value *J12 = nullptr;
-  ConstantInt *J13 = nullptr;
-  Value *J14 = nullptr;
 
-  if (match(I, m_Trunc(m_Value(J15))) && J15->getType()->isIntegerTy(64)) {
-    cs6475_debug("JT: matched the 'trunc'\n");
-    if (match(J15, m_Shr(m_Value(J0), m_ConstantInt(J1))) && J1->getZExtValue() == 16) {
-      cs6475_debug("JT: matched the 'lshr'\n");
-      if (match(J0, m_Mul(m_Value(J2), m_ConstantInt(J3))) && J3->getZExtValue() == 65793) {
-        cs6475_debug("JT: matched the 'mul'\n");
-        if (match(J2, m_Or(m_Value(J4),m_Value(J5)))) {
-          cs6475_debug("JT: matched the 'or'\n");
-          if (match(J4,m_And(m_Value(J6), m_ConstantInt(J7))) && J7->getZExtValue() == 139536) {
-            cs6475_debug("JT: matched the 'and'\n");
-            if (match(J6, m_Mul(m_Value(J8), m_ConstantInt(J9))) && J9->getZExtValue() == 2050) {
-              cs6475_debug("JT: matched the 'mul'\n");
-              if (match(J5, m_And(m_Value(J10),m_ConstantInt(J11))) && J11->getZExtValue() == 558144) {
-                cs6475_debug("JT: matched the 'and'\n");
-                if (match(J10, m_Mul(m_Value(J12),m_ConstantInt(J13))) && J13->getZExtValue()==32800) {
-                  cs6475_debug("JT: matched the 'mul'\n");
-                  if (J12 == J8 && J12->getType()->isIntegerTy(64)) {
-                    cs6475_debug("JT: verify z\n");
-                    if (match(J12, m_ZExt(m_Value(J14))) && J14->getType()->isIntegerTy(8)) {
-                    cs6475_debug("JT: matched the 'zext'\n");    
-  log_optzn("Joshua Tlatelpa-Agustin\n");                                             
-  IRBuilder<> Builder(I);
-  Value *first = Builder.CreateZExt(J14, Type::getInt64Ty(I->getContext()));
-  Value *second = Builder.CreateMul(first, Builder.getInt64(2149582850));
-  Value *third = Builder.CreateAnd(second, Builder.getInt64(36578664720));
-  Value *forth = Builder.CreateMul(third, Builder.getInt64(4311810305));
-  Value *fifth = Builder.CreateLShr(forth, 32);
-  Value *sixth = Builder.CreateTrunc(fifth, Type::getInt8Ty(I->getContext()));
-  I->replaceAllUsesWith(sixth);                                       
-  return nullptr;                       
+Instruction *cs6475_optimizer_tavakkoli(Instruction *I) {
+  cs6475_debug("\nCS 6475 matcher: running now\n");
+
+  // Match the pattern: (x^2 + 1) * (x^2 - 1) with %x2_minus_1 = add i16 %x2,
+  // 65535
+  Value *X = nullptr;
+  Value *X2_1 = nullptr;
+  Value *X2_2 = nullptr;
+
+  if (match(I, m_Mul(m_Value(X2_1), m_Value(X2_2)))) {
+    cs6475_debug("AMT: Matched the 'mul'\n");
+
+    // Get the bit width dynamically from the operands
+    Type *Ty = X2_1->getType();
+    unsigned bitWidth = 0;
+
+    if (Ty->isIntegerTy()) {
+      bitWidth = cast<IntegerType>(Ty)->getBitWidth();
+    } else {
+      cs6475_debug("AMT: Operand is not an integer type\n");
+      return nullptr;
+    }
+
+    if (match(X2_1, m_Add(m_Value(X2_1), m_One()))) {
+      cs6475_debug("AMT: Matched the 'x^2 + 1'\n");
+
+      if (match(X2_2, m_Add(m_Value(X2_2),
+                            m_SpecificInt(APInt::getAllOnes(bitWidth))))) {
+        cs6475_debug(
+            "AMT: Matched the 'x^2 -1' (which is x^2 - 1 in unsigned)\n");
+
+        if (X2_1 == X2_2) {
+          X = dyn_cast<Instruction>(X2_1)->getOperand(0); // Get X from x^2
+          cs6475_debug(
+              "AMT: Matched the full pattern, applying optimization\n");
+
+          // Apply the optimization: x^4 - 1
+          IRBuilder<> Builder(I);
+
+          Value *X2 = Builder.CreateMul(X, X, "x2");
+          Value *X4 = Builder.CreateMul(X2, X2, "x4");
+          Instruction *NewI = BinaryOperator::CreateSub(
+              X4, ConstantInt::get(I->getContext(), APInt(bitWidth, 1)),
+              "result");
+
+          cs6475_debug("AMT: Optimization applied\n");
+          log_optzn("Amir Mohammad Tavakkoli");
+
+          return NewI;
+        }
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+Instruction* cs6475_optimizer(Instruction *I, InstCombinerImpl &IC, LazyValueInfo *LVI) {
+  cs6475_debug("\nCS 6475 matcher: running now\n");
+
+  // BEGIN JOHN REGEHR
+  // x & (0x7FFFFFFF - x) → x & 0x80000000
+  {
+    const APInt *C = nullptr;
+    Value *X = nullptr;
+    Value *Y = nullptr;
+    if (match(I, m_And(m_Value(X), m_Value(Y)))) {
+      cs6475_debug("JDR: matched the 'and1'\n");
+      if (match(Y, m_Sub(m_APInt(C), m_Specific(X)))) {
+	cs6475_debug("JDR: matched the 'sub1'\n");
+	if (C->isMaxSignedValue()) {
+	  log_optzn("John Regehr 1");
+	  auto SMin = APInt::getSignedMinValue(C->getBitWidth());
+	  Instruction *NewI = BinaryOperator::CreateAnd(X, ConstantInt::get(I->getContext(), SMin));
+	  return NewI;
+	}
+      }
+    }
+  }
+  {
+    const APInt *C = nullptr;
+    Value *X = nullptr;
+    Value *Y = nullptr;
+    if (match(I, m_And(m_Value(X), m_Value(Y)))) {
+      cs6475_debug("JDR: matched the 'and2'\n");
+      if (match(X, m_Sub(m_APInt(C), m_Specific(Y)))) {
+	cs6475_debug("JDR: matched the 'sub2'\n");
+	if (C->isMaxSignedValue()) {
+	  log_optzn("John Regehr 2");
+	  auto SMin = APInt::getSignedMinValue(C->getBitWidth());
+	  Instruction *NewI = BinaryOperator::CreateAnd(Y, ConstantInt::get(I->getContext(), SMin));
+	  return NewI;
+	}
+      }
+    }
+  }
+  // END JOHN REGEHR
+
+  // BEGIN KHAGAN KARIMOV
+  {
+    ConstantInt *C = nullptr;
+    Value *X = nullptr;
+    Value *Y = nullptr;
+    Value *LHS = nullptr;
+    Value *RHS = nullptr;
+    IRBuilder<> Builder(I);
+    // X - Y + Y * C = X + Y * (C - 1)
+    if (match(I, m_c_Add(m_Value(LHS), m_Value(RHS)))) {
+      // cs6475_debug("KK: matched the 'add'\n");
+      if (match(LHS, m_Sub(m_Value(X), m_Value(Y))) &&
+          match(RHS, m_c_Mul(m_Value(Y), m_ConstantInt(C)))) {
+        // cs6475_debug("KK: matched the 'sub'\n");
+        // cs6475_debug("KK: matched the 'mul'\n");
+        log_optzn("Khagan Karimov");
+        Value *NewMul = Builder.CreateMul(
+            Y, Builder.CreateSub(C, ConstantInt::get(C->getType(), 1)));
+        Instruction *NewAdd = BinaryOperator::CreateAdd(X, NewMul);
+        return NewAdd;
+      }
+    }
+  }
+  // END KHAGAN KARIMOV
+
+  // BEGIN Amir Mohammad Tavakkoli
+  {
+    auto tavak_i = cs6475_optimizer_tavakkoli(I);
+    if (tavak_i != nullptr) {
+      return tavak_i;
+    }
+  }
+  // END Amir Mohammad Tavakkoli
+
+  // BEGIN STEFAN MADA
+  // For IR generated from a C++ loop as such:
+  // for(unsigned i = 1; i <= num; ++i)
+  //   sum += i;
+  // return sum;
+  // But with num being bounded, an optimization
+  // can be performed, reducing the instructions from
+  // 10 to 3.
+  // 
+  // Note: Tried to do this in IndVarSimplify pass,
+  // But impossible to get Function pass info
+  // (Lazy Value Info) while in a Loop pass,
+  // so was not able to perform range analysis.
+  // So done here after IndVarsSimplify
+  {
+    Value *X = nullptr;
+    Value *Y = nullptr;
+    Value *Z = nullptr;
+    Value *A = nullptr;
+    Value *B = nullptr;
+    Value *C = nullptr;
+    Value *D = nullptr;
+    Value *E = nullptr;
+    Value *F = nullptr;
+    Value *Bound = nullptr;
+    if(match(I, m_c_Add(m_Value(X), m_ConstantInt<-1>()))) {
+      unsigned EndBitWidth = static_cast<BinaryOperator*>(I)->getType()->getIntegerBitWidth();
+      if(match(X, m_c_Add(m_Value(Y), m_Value(Z)))) {
+        if(match(Z, m_Trunc(m_Value(A))) && static_cast<TruncInst*>(Z)->getType()->isIntegerTy(EndBitWidth)) {
+          if(match(A, m_LShr(m_Value(B), m_ConstantInt<1>()))) {
+            if(match(B, m_c_Mul(m_Value(E), m_Value(C)))) {
+              if(match(C, m_ZExt(m_Value(D))) && static_cast<ZExtInst*>(C)->getType()->isIntegerTy(EndBitWidth + 1)) {
+                if(match(D, m_c_Add(m_Value(Bound), m_ConstantInt<-2>()))) {
+                  if(match(E, m_ZExt(m_Value(F))) && static_cast<ZExtInst*>(E)->getType()->isIntegerTy(EndBitWidth + 1)) {
+                    if(match(F, m_c_Add(m_Specific(Bound), m_ConstantInt<-1>()))) {
+                      if(match(Y, m_Shl(m_Specific(Bound), m_ConstantInt<1>()))) {
+                        if(LVI->getConstantRange(Bound, I, false).getUpper().ult(std::pow(2, EndBitWidth / 2))) {
+                          log_optzn("Stefan Mada");
+                          auto OneAPInt = APInt(EndBitWidth, 1);
+                          auto *IncBound = IC.Builder.CreateAdd(Bound, ConstantInt::get(I->getContext(), OneAPInt));
+                          auto *MulVal = IC.Builder.CreateMul(Bound, IncBound);
+                          return BinaryOperator::CreateLShr(MulVal, ConstantInt::get(I->getContext(), OneAPInt));
+                        }
+                      }
                     }
                   }
                 }
@@ -5108,27 +5246,8 @@ Instruction* cs6475_optimizer(Instruction *I) {
         }
       }
     }
-  }                             
-  // END JOSHUA TLATELPA-AGUSTIN
-
-  // BEGIN JOHN REGEHR
-  // x & (0x7FFFFFFF - x) → x & 0x80000000
-  ConstantInt *C = nullptr;
-  Value *X = nullptr;
-  Value *Y = nullptr;
-  if (match(I, m_And(m_Value(X), m_Value(Y)))) {
-    cs6475_debug("JDR: matched the 'and'\n");
-    if (match(Y, m_Sub(m_ConstantInt(C), m_Specific(X)))) {
-      cs6475_debug("JDR: matched the 'sub'\n");
-      if (C->getUniqueInteger().isMaxSignedValue()) {
-	log_optzn("John Regehr");
-	auto SMin = APInt::getSignedMinValue(C->getUniqueInteger().getBitWidth());
-	Instruction *NewI = BinaryOperator::CreateAnd(X, ConstantInt::get(I->getContext(), SMin));
-	return NewI;
-      }
-    }
   }
-  // END JOHN REGEHR
+  // END STEFAN MADA
 
  return nullptr;
 }
@@ -5256,7 +5375,7 @@ bool InstCombinerImpl::run() {
     LLVM_DEBUG(dbgs() << "IC: Visiting: " << OrigI << '\n');
 
     Instruction *Result = nullptr;
-    if ((Result = visit(*I)) || (Result = cs6475_optimizer(I))) {
+    if ((Result = visit(*I)) || (Result = cs6475_optimizer(I, *this, LVI))) {
       ++NumCombined;
       // Should we replace the old instruction with a new one?
       if (Result != I) {
@@ -5525,7 +5644,7 @@ static bool combineInstructionsOverFunction(
     AssumptionCache &AC, TargetLibraryInfo &TLI, TargetTransformInfo &TTI,
     DominatorTree &DT, OptimizationRemarkEmitter &ORE, BlockFrequencyInfo *BFI,
     BranchProbabilityInfo *BPI, ProfileSummaryInfo *PSI,
-    const InstCombineOptions &Opts) {
+    const InstCombineOptions &Opts, LazyValueInfo *LVI = nullptr) {
   auto &DL = F.getDataLayout();
 
   /// Builder - This is an IRBuilder that automatically inserts new
@@ -5563,7 +5682,7 @@ static bool combineInstructionsOverFunction(
                       << F.getName() << "\n");
 
     InstCombinerImpl IC(Worklist, Builder, F.hasMinSize(), AA, AC, TLI, TTI, DT,
-                        ORE, BFI, BPI, PSI, DL, RPOT);
+                        ORE, BFI, BPI, PSI, DL, RPOT, LVI);
     IC.MaxArraySizeForCombine = MaxArraySize;
     bool MadeChangeInThisIteration = IC.prepareWorklist(F);
     MadeChangeInThisIteration |= IC.run();
@@ -5611,6 +5730,7 @@ PreservedAnalyses InstCombinePass::run(Function &F,
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &ORE = AM.getResult<OptimizationRemarkEmitterAnalysis>(F);
   auto &TTI = AM.getResult<TargetIRAnalysis>(F);
+  auto *LVI = &AM.getResult<LazyValueAnalysis>(F);
 
   auto *AA = &AM.getResult<AAManager>(F);
   auto &MAMProxy = AM.getResult<ModuleAnalysisManagerFunctionProxy>(F);
@@ -5621,7 +5741,7 @@ PreservedAnalyses InstCombinePass::run(Function &F,
   auto *BPI = AM.getCachedResult<BranchProbabilityAnalysis>(F);
 
   if (!combineInstructionsOverFunction(F, Worklist, AA, AC, TLI, TTI, DT, ORE,
-                                       BFI, BPI, PSI, Options))
+                                       BFI, BPI, PSI, Options, LVI))
     // No changes, all analyses are preserved.
     return PreservedAnalyses::all();
 
